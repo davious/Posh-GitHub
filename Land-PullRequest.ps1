@@ -3,57 +3,103 @@
   [int]$id,
 
   [Parameter(Mandatory=$False,Position=2)]
-  [string]$remote = "upstream"
+  [string]$remote = "upstream",
+
+  [Parameter(Mandatory=$False,Position=3)]
+  [bool]$done = $False
 )
-
-$user_repo = ""
-
-<#
-#!/usr/bin/env node
-/*
- * Pulley: Easy Github Pull Request Lander
- * Copyright 2011 John Resig
- * MIT Licensed
- */
-(function() {
-	"use strict";
-
-	var child = require("child_process"),
-		http = require("https"),
-		fs = require("fs"),
-		prompt = require("prompt"),
-		request = require("request"),
-		colors = require("colors"),
-		pkg = require("./package"),
-
-		// Process references
-		exec = child.exec,
-		spawn = child.spawn,
-
-		// Process arguments
-		id = process.argv[ 2 ],
-		done = process.argv[ 3 ],
-
-		// Localized application references
-		user_repo = "",
-		tracker = "",
-		token = "",
-
-		// Initialize config file
-		config = JSON.parse( fs.readFileSync( __dirname + "/config.json" ) );
-
-	// We don't want the default prompt message
-	prompt.message = "";
-#>
 
 Add-Type -AssemblyName System.Web
 
-function GetStatus
-{
-    $user_repo
+$user_repo = ""
+$tracker = ""
+$token = ""
+
+function CallAPI( $path, $callback ) {
+    $headers = @{
+        UserAgent = "Posh-GitHub"
+        Authorization = "token $token"
+      }
+    $response = Invoke-RestMethod "https://api.github.com$path" -Headers $headers
+    &$callback $response
+
+    trap [System.Net.WebException] {
+        $status = ([System.Net.HttpWebResponse]$_.Exception.Response).StatusCode
+        if ($status -eq "NotFound")
+        {
+            Write-Host -f red "Pull request doesn't exist"
+            return
+        }
+        if ($status -eq "Unauthorized")
+        {
+            Login
+            return
+        }
+        break
+    }
 }
 
-function Init()
+function Commit($pull)
+{
+    Write-Host "Commit $pull"
+}
+
+function MergePull($pull)
+{
+    Write-Host "Merge $pull"
+}
+
+function GetPullData {
+
+	$path = "/repos/$user_repo/pulls/$id"
+
+	Write-Host -f Blue "Getting pull request details... "
+
+    $callback = {
+        param($pull)
+	    if( $done ) {
+            Commit $pull
+        } else {
+            MergePull $pull
+        }
+    }
+    CallAPI $path $callback
+
+    trap {
+	    Write-Host -f red "Error retrieving pull request from Github."
+	    break
+	}
+}
+
+function GetStatus
+{
+    $status = Invoke-Expression "git status"
+    if(([string]$status) -imatch "Changes to be committed") {
+	    if ( $done ) {
+		    GetPullData
+	    } else {
+		    Write-Host -f Red "Please commit changed files before attemping a pull/merge."
+            return
+	    }
+    } elseif(([string]$status) -imatch "Changes not staged for commit") {
+	    if ( $done ) {
+            Write-Host -f Red "Please add files that you wish to commit."
+            return
+	    } else {
+		    Write-Host -f Red "Please stash files before attempting a pull/merge."
+            return
+	    }
+    } else {
+	    if ( $done ) {
+		    Write-Host -f Red "It looks like you've broken your merge attempt."
+            return
+	    } else {
+		    GetPullData
+	    }
+    }
+}
+
+function Init
 {
     $show = Invoke-Expression "git remote -v show $remote"
     ([string]$show) -match "(?m)^.*?URL:.*?([\w\-]+\/[\w\-]+)\.git.*?$" > $null
@@ -61,11 +107,11 @@ function Init()
     if ( $user_repo ) {
 		GetStatus
 	} else {
-		Write-Host -F "Red" "External repository not found for $remote"
+		Write-Host -f Red "External repository not found for $remote"
 	}
 }
 
-function Login()
+function Login
 {
     Write-Host "Please login with your GitHub credentials."
     Write-Host "Your credentials are only needed this one time to get a token from GitHub."
@@ -81,14 +127,14 @@ function Login()
       note_url = "https://github.com/iristyle/Posh-GitHub"
     }
     $params = @{
-      Uri = 'https://api.github.com/authorizations';
-      Method = 'POST';
+      Uri = 'https://api.github.com/authorizations'
+      Method = 'POST'
       Headers = @{
         UserAgent = "Posh-GitHub"
         Authorization = 'Basic ' + [Convert]::ToBase64String(
-          [Text.Encoding]::ASCII.GetBytes("$($username):$($password)"));
+          [Text.Encoding]::ASCII.GetBytes("$($username):$($password)"))
       }
-      ContentType = 'application/json';
+      ContentType = 'application/json'
       Body = (ConvertTo-Json $postData -Compress)
     }
 
@@ -104,7 +150,7 @@ function Login()
     else
     {
         $message = $GITHUB_API_OUTPUT | Select -ExpandProperty Message
-		Write-Host -F "Red" "$message. $ Try again... "
+		Write-Host -f Red "$message. $ Try again... "
 		Login
     }
 
@@ -114,7 +160,7 @@ function Login()
     }
 }
 
-Write-Host -F "Blue" "Initializing... "
+Write-Host -f Blue "Initializing... "
 
 $token = Invoke-Expression "git config --global --get pulley.token"
 $token.Trim() > $null
@@ -129,70 +175,7 @@ else
 <#
 
 
-	function init() {
-		if ( !id ) {
-			exit("No pull request ID specified, please provide one.");
-		}
 
-		exec( "git remote -v show " + config.remote, function( error, stdout, stderr ) {
-		    user_repo = ( /URL:.*?([\w\-]+\/[\w\-]+)\.git/m.exec( stdout ) || [] )[ 1 ];
-			tracker = config.repos[ user_repo ];
-
-			if ( user_repo ) {
-				getStatus();
-			} else {
-				exit("External repository not found.");
-			}
-		});
-	}
-
-	function getStatus() {
-		exec( "git status", function( error, stdout, stderr ) {
-			if ( /Changes to be committed/i.test( stdout ) ) {
-				if ( done ) {
-					getPullData();
-				} else {
-					exit("Please commit changed files before attemping a pull/merge.");
-				}
-			} else if ( /Changes not staged for commit/i.test( stdout ) ) {
-				if ( done ) {
-					exit("Please add files that you wish to commit.");
-
-				} else {
-					exit("Please stash files before attempting a pull/merge.");
-				}
-			} else {
-				if ( done ) {
-					exit("It looks like you've broken your merge attempt.");
-				} else {
-					getPullData();
-				}
-			}
-		});
-	}
-
-	function getPullData() {
-		var path = "/repos/" + user_repo + "/pulls/" + id;
-
-		console.log( "done.".green );
-		process.stdout.write( "Getting pull request details... ".blue );
-
-		callAPI( path, function( data ) {
-			try {
-				var pull = JSON.parse( data );
-
-				console.log( "done.".green );
-
-				if ( done ) {
-					commit( pull );
-				} else {
-					mergePull( pull );
-				}
-			} catch( e ) {
-				exit("Error retrieving pull request from Github.");
-			}
-		});
-	}
 
 	function mergePull( pull ) {
 		var repo = pull.head.repo.ssh_url,
