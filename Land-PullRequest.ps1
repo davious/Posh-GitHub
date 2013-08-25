@@ -22,18 +22,34 @@ $checkout = ""
 $head_branch = ""
 $base_branch = ""
 $branch = ""
-$process_args = [string]::Join(" ", $args)
+
+function Invoke-Expression2($cmd)
+{
+	Try
+	{
+		$result = (Invoke-Expression $cmd) 2>&1
+		if ($lastexitcode) {throw $result}
+	}
+	Catch
+	{
+		if ($_.FullyQualifiedErrorId -ieq "NativeCommandError")
+		{
+			return $_.FullyQualifiedErrorId
+		}
+	}
+	return $result
+}
 
 function GetHead {
 	$last_commit_log = "git log | head -1"
 	$last_commit_log_results = Invoke-Expression $last_commit_log
 	$last_commit_log_results = [string]$last_commit_log_results
-	$commit = $last_commit_log_results -imatch "commit (.*)";
+	$last_commit_log_results -imatch "commit (.*)"
 	return $matches[1]
 }
 
 function ResetRepository( $msg ) {
-	Write-Host -f red "\n" + $msg
+	Write-Host -f red $msg
 	Write-Host -f red "Resetting files... "
 	Invoke-Expression "git reset --hard ORIG_HEAD"
 	Write-Host -f green "done."
@@ -52,7 +68,6 @@ function GetJsonFromGitHub( $path ) {
 		if ($status -eq "NotFound")
 		{
 			Write-Host -f red "Pull request doesn't exist"
-			return
 		}
 		if ($status -eq "Unauthorized")
 		{
@@ -72,7 +87,7 @@ function Commit($pull)
 	$data = GetJsonFromGitHub $path
 
 	$match = ""
-	$msg = "Close GH-" + $id + ": " + $pull.title + ")."
+	$msg = "Close GH-" + $id + ": " + $pull.title + "."
 	$author = $data[0].commit.author.name
 	$base_branch = $pull.base.ref
 	$issues = @()
@@ -93,7 +108,7 @@ function Commit($pull)
 		$issues.Add( " Fixes #" + $match.Substring(1) )
 	}
 
-	// Add issues to the commit message
+	# Add issues to the commit message
 	$msg += [string]::Join(",", $issues)
 
 	if ( $urls.Count ) {
@@ -103,25 +118,27 @@ function Commit($pull)
 		}
 	}
 
-	$commit = "commit -a --message=$msg"
+	$commit = "git commit -a --message=""$msg"""
 
-<#todo
-	if ( config.interactive ) {
-		commit.push("-e");
-	}
-#>
+	#if ( config.interactive ) {
+	#	commit.push("-e");
+	#}
+
 
 	if ( $author ) {
 		$commit += " --author=$author"
 	}
 
-	$old_commit = GetHead    
-	Invoke-Expression $commit
+	$old_commit = GetHead
+	$old_commit = $old_commit[1]
+	Invoke-Expression2 $commit
 	$new_commit = GetHead
-	if ( oldCommit -eq newCommit ) {
+	$new_commit = $new_commit[1]
+	if ( $old_commit -eq $new_commit ) {
 		ResetRepository "No commit, aborting push."
 	} else {
 		Invoke-Expression "git push $remote $base_branch"
+		Invoke-Expression "git branch -D $branch"
 		Write-Host -f green "done."
 	}
 }
@@ -134,7 +151,7 @@ function DoPull($pull) {
 	)
 
 	$squash = [string]::Join("; ", $pull_cmds)
-	$squash_results = Invoke-Expression $squash
+	$squash_results = Invoke-Expression2 $squash
 	$squash_results = [string]$squash_results
 
 	if ( $squash_results -imatch "Merge conflict" ) {
@@ -147,25 +164,13 @@ function DoPull($pull) {
 
 	trap {
 		#todo test
-		Write-Host -f ref "Unable to merge.  Please resolve then retry."
+		Write-Host -f red "Unable to merge.  Please resolve then retry."
 		break
 	}
 }
 
 function MergePull($pull)
 {
-	$repo = $pull.head.repo.ssh_url
-	$head_branch = $pull.head.ref
-	$base_branch = $pull.base.ref
-	$branch = "pull-$id"
-	$checkout = "git checkout $base_branch"
-	$checkout_cmds = @(
-		$checkout,
-		"git pull $remote $base_branch"
-		"git submodule update --init",
-		"git checkout -b $branch"
-	)
-
 	Write-Host -f blue "Pulling and merging results... "
 
 	if ( $pull.state -eq "closed" ) {
@@ -184,20 +189,30 @@ function MergePull($pull)
 		return
 	}
 
+	$repo = $pull.head.repo.clone_url
+	$head_branch = $pull.head.ref
+	$base_branch = $pull.base.ref
+	$branch = "pull-$id"
+	$checkout = "git checkout $base_branch"
+	$checkout_cmds = @(
+		$checkout,
+		"git pull $remote $base_branch"
+		"git submodule update --init",
+		"git checkout -b $branch"
+	)
+
 	$create_merge_branch = [string]::Join("; ", $checkout_cmds)
-	$create_merge_branch_results = Invoke-Expression $create_merge_branch
+	$create_merge_branch_results = Invoke-Expression2 $create_merge_branch
 	$create_merge_branch_results = [string]$create_merge_branch_results
 
-	if ($? -imatch "toplevel")
+	if ($create_merge_branch_results -imatch "toplevel")
 	{
 		Write-Host -f red "Please call pulley from the toplevel directory of this repo."
 		return
+	} elseif ($create_merge_branch_results -imatch "fatal" ) {
+		Write-Host -f yellow (Invoke-Expression "git branch -D $branch")
+		MergePull $pull
 	} else {
-		if ($? -imatch "fatal" ) {
-			Invoke-Expression $checkout
-			Invoke-Expression "git branch -D $branch"
-			MergePull($pull)
-		}
 		DoPull $pull
 	}
 }
@@ -218,7 +233,7 @@ function GetPullData {
 
 	trap {
 		Write-Host -f red "Error retrieving pull request from Github."
-		break
+		return
 	}
 }
 
@@ -252,16 +267,15 @@ function GetStatus
 
 function Init
 {
-	$show = Invoke-Expression "git remote -v show $remote"
+	$show = Invoke-Expression2 "git remote -v show $remote"
 	([string]$show) -match "(?m)^.*?URL:.*?([\w\-]+\/[\w\-]+)\.git.*?$" > $null
-	$user_repo = $matches[1]
-	#$tracker = $repos[ $user_repo ];
-	if ( $user_repo ) {
+	if($matches) {
+		$user_repo = $matches[1]
+		#$tracker = $repos[ $user_repo ];
 		GetStatus
 	} else {
 		if($remote -eq "upstream") {
-			Write-Host -f yellow "External repository not found for upstream"
-			Write-Host -f yellow " Trying origin..."
+			Write-Host -f yellow "External repository not found for upstream. Failing back to origin."
 			$remote = "origin"
 			Init
 		} else {
