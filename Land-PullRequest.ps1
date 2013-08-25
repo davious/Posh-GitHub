@@ -3,25 +3,49 @@
   [int]$id,
 
   [Parameter(Mandatory=$False,Position=2)]
-  [string]$remote = "upstream",
+  $done = "",
 
   [Parameter(Mandatory=$False,Position=3)]
-  [bool]$done = $False
+  [string]$remote = "upstream"
 )
 
 Add-Type -AssemblyName System.Web
+
+$done = ($done -imatch "done")
 
 $user_repo = ""
 $tracker = ""
 $token = ""
 
-function CallAPI( $path, $callback ) {
+$repo = ""
+$checkout = ""
+$head_branch = ""
+$base_branch = ""
+$branch = ""
+$process_args = [string]::Join(" ", $args)
+
+function GetHead {
+    $last_commit_log = "git log | head -1"
+    $last_commit_log_results = Invoke-Expression $last_commit_log
+    $last_commit_log_results = [string]$last_commit_log_results
+	$commit = $last_commit_log_results -imatch "commit (.*)";
+	return $matches[1]
+}
+
+function ResetRepository( $msg ) {
+	Write-Host -f red "\n" + $msg
+	Write-Host -f red "Resetting files... "
+    Invoke-Expression "git reset --hard ORIG_HEAD"
+	Write-Host -f green "done."
+}
+
+function GetJsonFromGitHub( $path ) {
     $headers = @{
         UserAgent = "Posh-GitHub"
         Authorization = "token $token"
       }
     $response = Invoke-RestMethod "https://api.github.com$path" -Headers $headers
-    &$callback $response
+    return $response
 
     trap [System.Net.WebException] {
         $status = ([System.Net.HttpWebResponse]$_.Exception.Response).StatusCode
@@ -41,12 +65,141 @@ function CallAPI( $path, $callback ) {
 
 function Commit($pull)
 {
-    Write-Host "Commit $pull"
+    $path = "/repos/$user_repo/pulls/$id/commits"
+
+	Write-Host -f blue "Getting author and committing changes... "
+
+    $data = GetJsonFromGitHub $path
+
+	$match = ""
+	$msg = "Close GH-" + $id + ": " + $pull.title + ")."
+	$author = $data[0].commit.author.name
+	$base_branch = $pull.base.ref
+	$issues = @()
+	$urls = @()
+	$findBug = "#\d+"
+
+	# Search title and body for issues for issues to link to
+	if ( $tracker ) {
+        $all_matches = ([regex]::Matches($pull.title + $pull.body, $findBug) | %{$_.value})
+		foreach($match in $all_matches) {
+			$urls.Add( $tracker + $match.Substring(1) )
+		}
+	}
+
+	# Search just body for issues to add to the commit message
+    $all_matches = ([regex]::Matches($pull.body, $findBug) | %{$_.value})
+	foreach($match in $all_matches) {
+		$issues.Add( " Fixes #" + $match.Substring(1) )
+	}
+
+	// Add issues to the commit message
+	$msg += [string]::Join(",", $issues)
+
+	if ( $urls.Count ) {
+		$msg += "\n\nMore Details:"
+        foreach($url in $urls) {
+            $msg += "\n - $url"
+        }
+	}
+
+	$commit = "commit -a --message=$msg"
+
+<#todo
+	if ( config.interactive ) {
+		commit.push("-e");
+	}
+#>
+
+	if ( $author ) {
+		$commit += " --author=$author"
+	}
+
+    $old_commit = GetHead    
+    Invoke-Expression $commit
+    $new_commit = GetHead
+    if ( oldCommit -eq newCommit ) {
+		ResetRepository "No commit, aborting push."
+	} else {
+        Invoke-Expression "git push $remote $base_branch"
+		Write-Host -f green "done."
+    }
+}
+
+function DoPull($pull) {
+	$pull_cmds = @(
+		"git pull $repo $head_branch"
+		$checkout,
+		"git merge --no-commit --squash $branch"
+	)
+
+    $squash = [string]::Join("; ", $pull_cmds)
+    $squash_results = Invoke-Expression $squash
+    $squash_results = [string]$squash_results
+
+	if ( $squash_results -imatch "Merge conflict" ) {
+		Write-Host -f red "Merge conflict. Please resolve then run: Land-PullRequest $id done"
+        return
+	} else {
+		Write-Host -f green "done"
+		Commit $pull
+	}
+
+    trap {
+        #todo test
+        Write-Host -f ref "Unable to merge.  Please resolve then retry."
+        break
+    }
 }
 
 function MergePull($pull)
 {
-    Write-Host "Merge $pull"
+	$repo = $pull.head.repo.ssh_url
+	$head_branch = $pull.head.ref
+	$base_branch = $pull.base.ref
+	$branch = "pull-$id"
+	$checkout = "git checkout $base_branch"
+	$checkout_cmds = @(
+	    $checkout,
+		"git pull $remote $base_branch"
+		"git submodule update --init",
+		"git checkout -b $branch"
+	)
+
+	Write-Host -f blue "Pulling and merging results... "
+
+	if ( $pull.state -eq "closed" ) {
+		Write-Host -f red "Cannot merge closed Pull Requests."
+        return
+	}
+
+	if ( $pull.merged ) {
+        Write-Host -f red "This Pull Request has already been merged."
+        return
+	}
+
+	# TODO: give user the option to resolve the merge by themselves
+	if ( !$pull.mergeable ) {
+		Write-Host -f red "This Pull Request is not automatically mergeable."
+        return
+	}
+
+    $create_merge_branch = [string]::Join("; ", $checkout_cmds)
+    $create_merge_branch_results = Invoke-Expression $create_merge_branch
+    $create_merge_branch_results = [string]$create_merge_branch_results
+
+	if ($? -imatch "toplevel")
+    {
+        Write-Host -f red "Please call pulley from the toplevel directory of this repo."
+        return
+	} else {
+        if ($? -imatch "fatal" ) {
+            Invoke-Expression $checkout
+            Invoke-Expression "git branch -D $branch"
+            MergePull($pull)
+        }
+        DoPull $pull
+    }
 }
 
 function GetPullData {
@@ -55,15 +208,13 @@ function GetPullData {
 
 	Write-Host -f Blue "Getting pull request details... "
 
-    $callback = {
-        param($pull)
-	    if( $done ) {
-            Commit $pull
-        } else {
-            MergePull $pull
-        }
+    $pull = GetJsonFromGitHub $path
+
+	if( $done ) {
+        Commit $pull
+    } else {
+        MergePull $pull
     }
-    CallAPI $path $callback
 
     trap {
 	    Write-Host -f red "Error retrieving pull request from Github."
@@ -104,10 +255,18 @@ function Init
     $show = Invoke-Expression "git remote -v show $remote"
     ([string]$show) -match "(?m)^.*?URL:.*?([\w\-]+\/[\w\-]+)\.git.*?$" > $null
     $user_repo = $matches[1]
+    #$tracker = $repos[ $user_repo ];
     if ( $user_repo ) {
 		GetStatus
 	} else {
-		Write-Host -f Red "External repository not found for $remote"
+        if($remote -eq "upstream") {
+            Write-Host -f yellow "External repository not found for upstream"
+            Write-Host -f yellow " Trying origin..."
+            $remote = "origin"
+            Init
+        } else {
+		    Write-Host -f Red "External repository not found for $remote"
+        }
 	}
 }
 
@@ -172,186 +331,3 @@ else
 {
     Login
 }
-<#
-
-
-
-
-	function mergePull( pull ) {
-		var repo = pull.head.repo.ssh_url,
-			head_branch = pull.head.ref,
-			base_branch = pull.base.ref,
-			branch = "pull-" + id,
-			checkout = "git checkout " + base_branch,
-			checkout_cmds = [
-				checkout,
-				"git pull " + config.remote + " " + base_branch,
-				"git submodule update --init",
-				"git checkout -b " + branch
-			];
-
-		process.stdout.write( "Pulling and merging results... ".blue );
-
-		if ( pull.state === "closed" ) {
-			exit("Can not merge closed Pull Requests.");
-		}
-
-		if ( pull.merged ) {
-			exit("This Pull Request has already been merged.");
-		}
-
-		// TODO: give user the option to resolve the merge by themselves
-		if ( !pull.mergeable ) {
-			exit("This Pull Request is not automatically mergeable.");
-		}
-
-		exec( checkout_cmds.join( " && " ), function( error, stdout, stderr ) {
-			if ( /toplevel/i.test( stderr ) ) {
-				exit("Please call pulley from the toplevel directory of this repo.");
-			} else if ( /fatal/i.test( stderr ) ) {
-				exec( "git branch -D " + branch + " && " + checkout, doPull );
-			} else {
-				doPull();
-			}
-		});
-
-		function doPull( error, stdout, stderr ) {
-			var pull_cmds = [
-				"git pull " + repo + " " + head_branch,
-				checkout,
-				"git merge --no-commit --squash " + branch
-			];
-
-			exec( pull_cmds.join( " && " ), function( error, stdout, stderr ) {
-				if ( /Merge conflict/i.test( stdout ) ) {
-					exit("Merge conflict. Please resolve then run: " +
-						process.argv.join(" ") + " done");
-				} else if ( /error/.test( stderr ) ) {
-					exit("Unable to merge.  Please resolve then retry:\n" + stderr);
-				} else {
-					console.log( "done.".green );
-					commit( pull );
-				}
-			});
-		}
-	}
-
-	function commit( pull ) {
-		var path = "/repos/" + user_repo + "/pulls/" + id + "/commits";
-
-		process.stdout.write( "Getting author and committing changes... ".blue );
-
-		callAPI( path, function( data ) {
-			var match,
-				msg = "Close GH-" + id + ": " + pull.title + ".",
-				author = JSON.parse( data )[ 0 ].commit.author.name,
-				base_branch = pull.base.ref,
-				issues = [],
-				urls = [],
-				findBug = /#(\d+)/g;
-
-			// Search title and body for issues for issues to link to
-			if ( tracker ) {
-				while ( ( match = findBug.exec( pull.title + pull.body ) ) ) {
-					urls.push( tracker + match[ 1 ] );
-				}
-			}
-
-			// Search just body for issues to add to the commit message
-			while ( ( match = findBug.exec( pull.body ) ) ) {
-				issues.push( " Fixes #" + match[ 1 ] );
-			}
-
-			// Add issues to the commit message
-			msg += issues.join(",");
-
-			if ( urls.length ) {
-				msg += "\n\nMore Details:" + urls.map(function( url ) {
-					return "\n - " + url;
-				}).join("");
-			}
-
-			var commit = [ "commit", "-a", "--message=" + msg ];
-
-			if ( config.interactive ) {
-				commit.push("-e");
-			}
-
-			if ( author ) {
-				commit.push( "--author=" + author );
-			}
-
-			getHEAD(function( oldCommit ) {
-				// Thanks to: https://gist.github.com/927052
-				spawn( "git", commit, {
-					customFds: [ process.stdin, process.stdout, process.stderr ]
-				}).on( "exit", function() {
-					getHEAD(function( newCommit ) {
-						if ( oldCommit === newCommit ) {
-							reset("No commit, aborting push.");
-						} else {
-							exec( "git push " + config.remote + " " + base_branch, function( error, stdout, stderr ) {
-								console.log( "done.".green );
-								exit();
-							});
-						}
-					});
-				});
-			});
-		});
-	}
-
-	function callAPI( path, callback ) {
-		request.get( "https://api.github.com" + path, {
-			headers: {
-				Authorization: "token " + token,
-				"User-Agent": "Pulley " + pkg.version
-			}
-		}, function( err, res, body ) {
-			var statusCode = res.socket._httpMessage.res.statusCode;
-
-			if ( err ) {
-				exit( err );
-			}
-
-			if ( statusCode === 404 ) {
-				exit("Pull request doesn't exist");
-			}
-
-			if ( statusCode === 401 ) {
-				login();
-				return;
-			}
-
-			callback( body );
-		});
-	}
-
-	function getHEAD( fn ) {
-		exec( "git log | head -1", function( error, stdout, stderr ) {
-			var commit = ( /commit (.*)/.exec( stdout ) || [] )[ 1 ];
-
-			fn( commit );
-		});
-	}
-
-	function reset( msg ) {
-		console.error( ( "\n" + msg ).red );
-		process.stderr.write( "Resetting files... ".red );
-
-		exec( "git reset --hard ORIG_HEAD", function() {
-			console.log( "done.".green );
-			exit();
-		});
-	}
-
-	function exit( msg ) {
-		if ( msg ) {
-			console.error( ( "\nError: " + msg ).red );
-		}
-
-		process.exit( 1 );
-	}
-
-})();
-#>
