@@ -6,7 +6,9 @@
 	$done = "",
 
 	[Parameter(Mandatory=$False,Position=3)]
-	[string]$remote = "upstream"
+	[string]$remote = "upstream",
+
+    [switch]$interactive
 )
 
 Add-Type -AssemblyName System.Web
@@ -22,6 +24,8 @@ $checkout = ""
 $head_branch = ""
 $base_branch = ""
 $branch = ""
+
+$n = "`r`n"
 
 function Invoke-Expression2($cmd)
 {
@@ -112,21 +116,20 @@ function Commit($pull)
 	$msg += [string]::Join(",", $issues)
 
 	if ( $urls.Count ) {
-		$msg += "\n\nMore Details:"
+		$msg += "$n$($n)More Details:"
 		foreach($url in $urls) {
-			$msg += "\n - $url"
+			$msg += "$n - $url"
 		}
 	}
 
 	$commit = "git commit -a --message=""$msg"""
 
-	#if ( config.interactive ) {
-	#	commit.push("-e");
-	#}
-
+	if ( $interactive ) {
+	#	$commit += " -e"
+	}
 
 	if ( $author ) {
-		$commit += " --author=$author"
+		$commit += " --author=""$author"""
 	}
 
 	$old_commit = GetHead
@@ -323,7 +326,7 @@ function Login
 	else
 	{
 		$message = $GITHUB_API_OUTPUT | Select -ExpandProperty Message
-		Write-Host -f Red "$message. $ Try again... "
+		Write-Host -f Red "$message. Try again... "
 		Login
 	}
 
