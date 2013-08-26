@@ -52,8 +52,8 @@ function GetHead {
 }
 
 function ResetRepository( $msg ) {
-	Write-Error $msg
-	Write-Error "Resetting files... "
+	Write-Host -f red $msg
+	Write-Host -f red "Resetting files... "
 	git reset --hard ORIG_HEAD
 	Write-Host -f green "done."
 }
@@ -70,7 +70,7 @@ function GetJsonFromGitHub( $path ) {
 		$status = ([System.Net.HttpWebResponse]$_.Exception.Response).StatusCode
 		if ($status -eq "NotFound")
 		{
-			Write-Error "Pull request doesn't exist"
+			Write-Host -f red "Pull request doesn't exist"
 		}
 		if ($status -eq "Unauthorized")
 		{
@@ -157,7 +157,7 @@ function DoPull($pull) {
 	$squash_results = [string]$squash_results
 
 	if ( $squash_results -imatch "Merge conflict" ) {
-		Write-Error "Merge conflict. Please resolve then run: Land-PullRequest $id done"
+		Write-Host -f red "Merge conflict. Please resolve then run: Land-PullRequest $id done"
 		return
 	} else {
 		Write-Host -f green "done"
@@ -166,7 +166,7 @@ function DoPull($pull) {
 
 	trap {
 		#todo test
-		Write-Error "Unable to merge.  Please resolve then retry."
+		Write-Host -f red "Unable to merge.  Please resolve then retry."
 		break
 	}
 }
@@ -176,18 +176,18 @@ function MergePull($pull)
 	Write-Host -f blue "Pulling and merging results... "
 
 	if ( $pull.state -eq "closed" ) {
-		Write-Error "Cannot merge closed Pull Requests."
+		Write-Host -f red "Cannot merge closed Pull Requests."
 		return
 	}
 
 	if ( $pull.merged ) {
-		Write-Error "This Pull Request has already been merged."
+		Write-Host -f red "This Pull Request has already been merged."
 		return
 	}
 
 	# TODO: give user the option to resolve the merge by themselves
 	if ( !$pull.mergeable ) {
-		Write-Error "This Pull Request is not automatically mergeable."
+		Write-Host -f red "This Pull Request is not automatically mergeable."
 		return
 	}
 
@@ -209,7 +209,7 @@ function MergePull($pull)
 
 	if ($create_merge_branch_results -imatch "toplevel")
 	{
-		Write-Error "Please call pulley from the toplevel directory of this repo."
+		Write-Host -f red "Please call pulley from the toplevel directory of this repo."
 		return
 	} elseif ($create_merge_branch_results -imatch "fatal" ) {
 		Write-Host -f yellow (git branch -D $branch)
@@ -234,7 +234,7 @@ function GetPullData {
 	}
 
 	trap {
-		Write-Error "Error retrieving pull request from Github."
+		Write-Host -f red "Error retrieving pull request from Github."
 		return
 	}
 }
@@ -246,20 +246,20 @@ function GetStatus
 		if ( $done ) {
 			GetPullData
 		} else {
-			Write-Error "Please commit changed files before attemping a pull/merge."
+			Write-Host -f red "Please commit changed files before attemping a pull/merge."
 			return
 		}
 	} elseif(([string]$status) -imatch "Changes not staged for commit") {
 		if ( $done ) {
-			Write-Error "Please add files that you wish to commit."
+			Write-Host -f red "Please add files that you wish to commit."
 			return
 		} else {
-			Write-Error "Please stash files before attempting a pull/merge."
+			Write-Host -f red "Please stash files before attempting a pull/merge."
 			return
 		}
 	} else {
 		if ( $done ) {
-			Write-Error "It looks like you've broken your merge attempt."
+			Write-Host -f red "It looks like you've broken your merge attempt."
 			return
 		} else {
 			GetPullData
@@ -281,7 +281,7 @@ function Init
 			$remote = "origin"
 			Init
 		} else {
-			Write-Error "External repository not found for $remote"
+			Write-Host -f red "External repository not found for $remote"
 		}
 	}
 }
@@ -325,7 +325,7 @@ function Login
 	else
 	{
 		$message = $GITHUB_API_OUTPUT | Select -ExpandProperty Message
-		Write-Error "$message. Try again... "
+		Write-Host -f red "$message. Try again... "
 		Login
 	}
 
