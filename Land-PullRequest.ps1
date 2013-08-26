@@ -1,11 +1,11 @@
 [CmdletBinding()] Param(
-	[Parameter(Mandatory=$True,Position=1)]
+	[Parameter(Mandatory=$True)]
 	[int]$id,
 
-	[Parameter(Mandatory=$False,Position=2)]
+	[Parameter(Mandatory=$False)]
 	$done = "",
 
-	[Parameter(Mandatory=$False,Position=3)]
+	[Parameter(Mandatory=$False)]
 	[string]$remote = "upstream",
 
     [switch]$interactive
@@ -36,7 +36,7 @@ function Invoke-Expression2($cmd)
 	}
 	Catch
 	{
-		if ($_.FullyQualifiedErrorId -ieq "NativeCommandError")
+		if ($_.FullyQualifiedErrorId -ne "NativeCommandError")
 		{
 			return $_.FullyQualifiedErrorId
 		}
@@ -45,17 +45,16 @@ function Invoke-Expression2($cmd)
 }
 
 function GetHead {
-	$last_commit_log = "git log | head -1"
-	$last_commit_log_results = Invoke-Expression $last_commit_log
+	$last_commit_log_results = git log | head -1
 	$last_commit_log_results = [string]$last_commit_log_results
 	$last_commit_log_results -imatch "commit (.*)"
 	return $matches[1]
 }
 
 function ResetRepository( $msg ) {
-	Write-Host -f red $msg
-	Write-Host -f red "Resetting files... "
-	Invoke-Expression "git reset --hard ORIG_HEAD"
+	Write-Error $msg
+	Write-Error "Resetting files... "
+	git reset --hard ORIG_HEAD
 	Write-Host -f green "done."
 }
 
@@ -71,7 +70,7 @@ function GetJsonFromGitHub( $path ) {
 		$status = ([System.Net.HttpWebResponse]$_.Exception.Response).StatusCode
 		if ($status -eq "NotFound")
 		{
-			Write-Host -f red "Pull request doesn't exist"
+			Write-Error "Pull request doesn't exist"
 		}
 		if ($status -eq "Unauthorized")
 		{
@@ -140,8 +139,8 @@ function Commit($pull)
 	if ( $old_commit -eq $new_commit ) {
 		ResetRepository "No commit, aborting push."
 	} else {
-		Invoke-Expression "git push $remote $base_branch"
-		Invoke-Expression "git branch -D $branch"
+		git push $remote $base_branch
+		git branch -D $branch
 		Write-Host -f green "done."
 	}
 }
@@ -158,7 +157,7 @@ function DoPull($pull) {
 	$squash_results = [string]$squash_results
 
 	if ( $squash_results -imatch "Merge conflict" ) {
-		Write-Host -f red "Merge conflict. Please resolve then run: Land-PullRequest $id done"
+		Write-Error "Merge conflict. Please resolve then run: Land-PullRequest $id done"
 		return
 	} else {
 		Write-Host -f green "done"
@@ -167,7 +166,7 @@ function DoPull($pull) {
 
 	trap {
 		#todo test
-		Write-Host -f red "Unable to merge.  Please resolve then retry."
+		Write-Error "Unable to merge.  Please resolve then retry."
 		break
 	}
 }
@@ -177,18 +176,18 @@ function MergePull($pull)
 	Write-Host -f blue "Pulling and merging results... "
 
 	if ( $pull.state -eq "closed" ) {
-		Write-Host -f red "Cannot merge closed Pull Requests."
+		Write-Error "Cannot merge closed Pull Requests."
 		return
 	}
 
 	if ( $pull.merged ) {
-		Write-Host -f red "This Pull Request has already been merged."
+		Write-Error "This Pull Request has already been merged."
 		return
 	}
 
 	# TODO: give user the option to resolve the merge by themselves
 	if ( !$pull.mergeable ) {
-		Write-Host -f red "This Pull Request is not automatically mergeable."
+		Write-Error "This Pull Request is not automatically mergeable."
 		return
 	}
 
@@ -210,10 +209,10 @@ function MergePull($pull)
 
 	if ($create_merge_branch_results -imatch "toplevel")
 	{
-		Write-Host -f red "Please call pulley from the toplevel directory of this repo."
+		Write-Error "Please call pulley from the toplevel directory of this repo."
 		return
 	} elseif ($create_merge_branch_results -imatch "fatal" ) {
-		Write-Host -f yellow (Invoke-Expression "git branch -D $branch")
+		Write-Host -f yellow (git branch -D $branch)
 		MergePull $pull
 	} else {
 		DoPull $pull
@@ -235,32 +234,32 @@ function GetPullData {
 	}
 
 	trap {
-		Write-Host -f red "Error retrieving pull request from Github."
+		Write-Error "Error retrieving pull request from Github."
 		return
 	}
 }
 
 function GetStatus
 {
-	$status = Invoke-Expression "git status"
+	$status = git status
 	if(([string]$status) -imatch "Changes to be committed") {
 		if ( $done ) {
 			GetPullData
 		} else {
-			Write-Host -f Red "Please commit changed files before attemping a pull/merge."
+			Write-Error "Please commit changed files before attemping a pull/merge."
 			return
 		}
 	} elseif(([string]$status) -imatch "Changes not staged for commit") {
 		if ( $done ) {
-			Write-Host -f Red "Please add files that you wish to commit."
+			Write-Error "Please add files that you wish to commit."
 			return
 		} else {
-			Write-Host -f Red "Please stash files before attempting a pull/merge."
+			Write-Error "Please stash files before attempting a pull/merge."
 			return
 		}
 	} else {
 		if ( $done ) {
-			Write-Host -f Red "It looks like you've broken your merge attempt."
+			Write-Error "It looks like you've broken your merge attempt."
 			return
 		} else {
 			GetPullData
@@ -282,7 +281,7 @@ function Init
 			$remote = "origin"
 			Init
 		} else {
-			Write-Host -f Red "External repository not found for $remote"
+			Write-Error "External repository not found for $remote"
 		}
 	}
 }
@@ -320,13 +319,13 @@ function Login
 	$token = $GITHUB_API_OUTPUT | Select -ExpandProperty Token
 	if($token)
 	{
-		Invoke-Expression "git config --global --add pulley.token $token"
+		git config --global --add pulley.token $token
 		Init
 	}
 	else
 	{
 		$message = $GITHUB_API_OUTPUT | Select -ExpandProperty Message
-		Write-Host -f Red "$message. Try again... "
+		Write-Error "$message. Try again... "
 		Login
 	}
 
@@ -338,7 +337,7 @@ function Login
 
 Write-Host -f Blue "Initializing... "
 
-$token = Invoke-Expression "git config --global --get pulley.token"
+$token = git config --global --get pulley.token
 $token.Trim() > $null
 if($token)
 {
@@ -348,3 +347,4 @@ else
 {
 	Login
 }
+
